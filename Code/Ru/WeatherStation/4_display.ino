@@ -1,357 +1,249 @@
-const int8_t mainP = 0, addP = 1, hourP = 2, dayP = 3, debugP = 4;
+enum PagesConsts {
+  mainP,
+  addP,
+  hourP,
+  dayP,
+  debugP
+};
 
-bool backlightTurnedOn = true; time_t keysPressed = 0; int nowBrightness = 0;
+bool useBacklight = true, isTempOutdated, isFeelingTempOutdated, isTimePrinted;
+int8_t lastCTemp, lastOutdoorTemp, lastCFeelingTemp, lastMinute, lastWeatherIcon;
+int16_t lcdBrightness = 0;
+uint32_t keysPressedTime = 0;
 
-void tryChangeBrightness() {
-  if (isNowNight() and now()-keysPressed>LCD_DELAY_BRIGHTNESS) backlightTurnedOn = false;
-  else if (!isNowNight() or now()-keysPressed<=LCD_DELAY_BRIGHTNESS) backlightTurnedOn = true;  
+void tryChangeBrightness() { // смена яркости при необходимости
+  if (isNowNight() and millis()-keysPressedTime > LCD_DELAY_BRIGHTNESS) useBacklight = false;
+  else if (!isNowNight() or millis()-keysPressedTime <= LCD_DELAY_BRIGHTNESS) useBacklight = true;  
 
-  if (backlightTurnedOn and nowBrightness<LCD_MAX_BRIGHTNESS) {
-    while (nowBrightness<LCD_MAX_BRIGHTNESS) {
-      analogWrite(LCD_BACKLIGHT_PIN, ++nowBrightness);
+  if (useBacklight and lcdBrightness < LCD_MAX_BRIGHTNESS) { // повышение яркости при необходимости
+    while (lcdBrightness < LCD_MAX_BRIGHTNESS) {
+      if (++lcdBrightness == 255) digitalWrite(LCD_BACKLIGHT_PIN, HIGH);
+      else analogWrite(LCD_BACKLIGHT_PIN, lcdBrightness);
       delayMicroseconds(LCD_SPEED_BRIGHTNESS);
     }
   }
-  else if (!backlightTurnedOn and 0<nowBrightness) {
-    while (0<nowBrightness) {
-      analogWrite(LCD_BACKLIGHT_PIN, --nowBrightness);
-      lButtonPressed = digitalRead(LEFT_BUTTON_PIN); rButtonPressed = analogRead(RIGHT_BUTTON_PIN)>512;
+  else if (!useBacklight and 0 < lcdBrightness) { // понижение яркости при необходимости с перехватом нажатий кнопок
+    while (0 < lcdBrightness) {
+      if (--lcdBrightness == 0) digitalWrite(LCD_BACKLIGHT_PIN, LOW);
+      else analogWrite(LCD_BACKLIGHT_PIN, lcdBrightness);
+
+      updateButtonVars(false);
       delayMicroseconds(LCD_SPEED_BRIGHTNESS);
-      if (lButtonPressed or rButtonPressed) { checkButtons(); break; } // если кнопка нажата - просто передаем управление функции работы с кнопками
+      if (lButtonPressed or rButtonPressed) { // если кнопка нажата - просто передаем управление функции работы с кнопками
+        checkButtons();
+        break;
+      }
     }
   }
 }
 
-void clearArea(int8_t posX) { // очистка участка под смещаемые символы
-  lcd.setCursor(posX, 0); lcd.print("                ");
-  lcd.setCursor(posX, 1); lcd.print("                ");
+void flip(int8_t to, int8_t fun, int8_t pageNumber = 0) { // изменение вкладки с анимацией смещения
+  for (int8_t i = -2; i <= 0; i++) {
+    int8_t modifiedI = (to == D_LEFT) ? i : -i;
+    switch(fun) {
+      case mainP: { drawMainPage(modifiedI); break; }
+      case addP: { drawAdditionalPage(modifiedI); break; }
+      case debugP: { drawDebugPage(modifiedI); break; }
+      case hourP: { drawHourPage(modifiedI, pageNumber); break; }
+      case dayP: { drawDayPage(modifiedI, pageNumber); break; }
+    }
+    delayMicroseconds((75 + i*15) * 1000);
+  }
+  switch(fun) {
+    case mainP: { pageType = 0; pageNum = 0; break; }
+    case addP: { pageType = 0; pageNum = 1; break; }
+    case debugP: { pageType = 0; pageNum = 2; break; }
+  }
 }
-int nowTemperatureW, outdoorTempW, nowFeelsW, weatherIconW, lastMinute;
-bool tempOutdated, tempFeelsOutdated, timePrinted;
 
-void drawMainPage(int8_t posX) {
+void drawMainPage(int8_t posX) { // отрисовка главной вкладки
+  // очистка места под печать
   clearArea(posX);
-  if (outdoorTemp == -127) {
-    lcd.setCursor(posX, 0); lcd.print("В городе ");
-    if (now()-weatherUpdated>DELAY_CHECK_WEATHER*2) { lcd.print("??"); }
-    else { lcd.print(nowTemperature); lcd.write(byte(0)); }
-  }
-  else {
-    lcd.setCursor(posX, 0); lcd.print("За окном "); lcd.print(outdoorTemp); lcd.write(byte(0));
-  }
 
-  if (weatherIcon != 0) { lcd.setCursor(posX+15, 0); lcd.write(byte(weatherIcon)); } // отрисовка иконки дождя или снега
+  // отрисовка текущей температуры (с датчика или с сервера)
+  lcd.setCursor(posX, 0);
+  if (isOutdoorSensorConnected()) printOutdoorTemp();
+  else printCityTemp();
+  lastCTemp = cTemp;
+  lastOutdoorTemp = outdoorTemp;
+  isTempOutdated = isWeatherOutdated();
 
-  lcd.setCursor(posX, 1); lcd.print("Ощущ"); lcd.write(byte(5)); lcd.print(" ");
-  if (now()-weatherUpdated>DELAY_CHECK_WEATHER*2) { lcd.print("??"); }
-  else { lcd.print(nowFeels); lcd.write(byte(0)); }
+  // отрисовка иконки дождя или снега
+  lcd.setCursor(posX+15, 0);
+  printPrecipitationIcon();
 
-  timePrinted = ((second()+7)/5)%2;
+  // отрисовка ощущаемой температуры
+  lcd.setCursor(posX, 1);
+  printFeelingTemp();
+  lastCFeelingTemp = cFeelingTemp;
+  isFeelingTempOutdated = isTempOutdated;
+
+  // пишем время или дату
   lcd.setCursor(posX+11, 1);
-  if (timePrinted) updateClockAndDate(1); // пишем время
-  else updateClockAndDate(2); // пишем дату
-
-  nowTemperatureW = nowTemperature; outdoorTempW = outdoorTemp; nowFeelsW = nowFeels; weatherIconW = weatherIcon;
-  tempOutdated = now()-weatherUpdated>DELAY_CHECK_WEATHER*2; tempFeelsOutdated = tempOutdated;
+  printDataOrTime();
+  isTimePrinted = isTimeShouldBeOnDisplay();
   lastMinute = minute();
 }
 
-void tryUpdateMainPage() { // код проверки необходимости изменений на дисплее
-    if (outdoorTemp != outdoorTempW) { // если произошло изменение температуры на датчике
-      if (outdoorTemp == -127) { // если датчик был отключен
-        tempOutdated = now()-weatherUpdated>DELAY_CHECK_WEATHER*2; // проверяем актуальность имеющейся температуры
-        if (tempOutdated) { // если неактуальна
-          updateMainTemp(2); // пишем В городе + ??
-        }
-        else{ // если актуальна
-          updateMainTemp(3); // пишем В городе + температуру
-        }
-      }
-      else{ // если нужно просто поменять значение температуры
-        if (outdoorTempW == -127) updateMainTemp(0); // пишем За окном + температуру с датчика
-        else updateMainTemp(1); // обновляем температуру с датчика
-      }
+void tryUpdateMainPage() { // проверка необходимости вывести изменение на главной вкладке
+  if (outdoorTemp != lastOutdoorTemp) { // если произошло изменение температуры на датчике
+    if (!isOutdoorSensorConnected()) { // если датчик был отключен
+      isTempOutdated = isWeatherOutdated(); // проверяем актуальность имеющейся температуры
+      if (isTempOutdated) updateMainTemp(2); // если неактуальна, пишем В городе + ??
+      else updateMainTemp(3); // если актуальна, пишем В городе + температуру
     }
-    else if (outdoorTemp == -127) { // если датчик отключен уже какое-то время
-      if (tempOutdated != now()-weatherUpdated>DELAY_CHECK_WEATHER*2) { // если теперь погода неактуальна или снова актуальна
-        tempOutdated = now()-weatherUpdated>DELAY_CHECK_WEATHER*2;
-        if (tempOutdated) { // если неактуальна
-          updateMainTemp(4); // пишем ??
-        }
-        else{ // если актуальна
-          updateMainTemp(5); // пишем температуру вместо ??
-        }
-      }
-      else if (nowTemperature != nowTemperatureW) { // если актуальна и изменилась
-        updateMainTemp(5); // обновляем температуру
-      }
+    else if (lastOutdoorTemp == -127) updateMainTemp(0); // если датчик был подключен - пишем За окном + температуру с датчика
+    else updateMainTemp(1); // если нужно просто поменять значение температуры - обновляем температуру с датчика
+  }
+  else if (!isOutdoorSensorConnected()) { // если датчик отключен уже какое-то время
+    if (isTempOutdated != isWeatherOutdated()) { // если теперь погода неактуальна или снова актуальна
+      isTempOutdated = isWeatherOutdated();
+      if (isTempOutdated) updateMainTemp(4); // если неактуальна, пишем ??
+      else updateMainTemp(5); // если актуальна, пишем температуру вместо ??
     }
-    outdoorTempW = outdoorTemp;
-    nowTemperatureW = nowTemperature;
+    else if (cTemp != lastCTemp) { // если изменилась (и актуальна)
+      updateMainTemp(5); // обновляем температуру
+    }
+  }
+  lastOutdoorTemp = outdoorTemp, lastCTemp = cTemp;
 
-    if (tempFeelsOutdated != now()-weatherUpdated>DELAY_CHECK_WEATHER*2 or nowFeels != nowFeelsW) { // если актуальность ощущаемой температуры изменилась или изменилась сама температура
-      tempFeelsOutdated = now()-weatherUpdated>DELAY_CHECK_WEATHER*2;
-      if (tempFeelsOutdated) updateFeelsTemp(1); // если неактуальна пишем ??
-      else updateFeelsTemp(0); // если актуальна пишем температуру вместо ??
-      nowFeelsW = nowFeels;
-    }
+  if (isFeelingTempOutdated != isWeatherOutdated() or cFeelingTemp != lastCFeelingTemp) { // если актуальность ощущаемой температуры изменилась или изменилась сама температура
+    isFeelingTempOutdated = isWeatherOutdated();
+    if (isFeelingTempOutdated) updateFeelsTemp(1); // если неактуальна пишем ??
+    else updateFeelsTemp(0); // если актуальна пишем температуру вместо ??
+    lastCFeelingTemp = cFeelingTemp;
+  }
 
-    if (weatherIcon != weatherIconW) { // отрисовка иконки дождя или снега (или их удаление)
-      updateWeatherIcon();
-    }
+  if (weatherIcon != lastWeatherIcon) { // отрисовка иконки дождя или снега (или их удаление)
+    lcd.setCursor(15, 0);
+    printPrecipitationIcon();
+  }
 
-    /*lcd.setCursor(13, 0); lcd.print(second()); // написание текущей секунды (только для дебага!!)
-    if ((second()) < 10)  lcd.print(" ");*/
-    
-    if (timePrinted != ((second()+7)/5)%2) { // если нужно сменить дату на время (или наоборот)
-      timePrinted = ((second()+7)/5)%2;
-      lcd.setCursor(11, 1);
-      if (timePrinted) {
-        updateClockAndDate(1); // пишем время
-      }
-      else {
-        updateClockAndDate(2); // пишем дату
-        if (now()-keysPressed>LCD_DELAY_BRIGHTNESS) tryUpdateWeather(); // получение погоды
-      }
-      updateTemperature(); // получение температуры с датчиков
-    }
-    else if (timePrinted and lastMinute != minute()) { // если сейчас написано неактуальное время (произошла смена минуты)
-      lcd.setCursor(11, 1);
-      updateClockAndDate(1);
-      lastMinute = minute();
-      if (now()-keysPressed>LCD_DELAY_BRIGHTNESS) tryUpdateTime(); // получение времени
-    }
-}
-
-void updateMainTemp(int state) { // если на дисплее изменилась основная температура
-  if (state == 0) { // если нужно написать За окном
-    lcd.setCursor(0, 0); lcd.print("За окном"); // пишем За окном
-  }
-  if (state == 0 or state == 1) { // если нужно написать температуру с датчика
-    lcd.setCursor(9, 0); lcd.print("    "); // стираем старое значение
-    lcd.setCursor(9, 0); lcd.print(outdoorTemp); lcd.write(byte(0));
-  }
-  if (state == 2 or state == 3) { // если нужно написать В городе
-    lcd.setCursor(0, 0); lcd.print("В городе"); // пишем В городе
-  }
-  if (state == 2 or state == 4) { // если нужно написать ??
-    lcd.setCursor(9, 0); lcd.print("    "); // стираем старое значение
-    lcd.setCursor(9, 0); lcd.print("??");
-  }
-  if (state == 3 or state == 5) { // если нужно написать температуру из интернета
-    lcd.setCursor(9, 0); lcd.print("    "); // стираем старое значение
-    lcd.setCursor(9, 0); lcd.print(nowTemperature); lcd.write(byte(0));
-  }
-}
-void updateFeelsTemp(int state) { // если на дисплее изменилась ощущаемая температура
-  lcd.setCursor(6, 1); lcd.print("    "); // стираем старое значение
-  lcd.setCursor(6, 1);
-  if (state == 0) { lcd.print(nowFeels); lcd.write(byte(0)); } // если нужно написать температуру
-  else if (state == 1) lcd.print("??"); // если нужно написать ??
-}
-void updateClockAndDate(int state) { // если на дисплее изменилась ощущаемая температура
-  if (state == 1) { // если нужно написать время
-    if (hour()<10) lcd.print("0"); // если час занимает 1 символ - добавляем 0
-    lcd.print(hour());
-    lcd.print(":");
-    if (minute()<10) lcd.print("0"); // если минута занимает 1 символ - добавляем 0
-    lcd.print(minute()); 
-  }
-  if (state == 2) { // если нужно написать дату
-    if (day()<10) lcd.print("0"); // если день занимает 1 символ - добавляем еще один пробел
-    lcd.print(day());
-    lcd.print(".");
-    if (month()<10) lcd.print("0"); // если месяц занимает 1 символ - пишем 0
-    lcd.print(month());
-  }
-}
-void updateWeatherIcon() {
-  lcd.setCursor(15, 0);
-  if (weatherIcon == 0) lcd.print(" ");
-  else lcd.write(byte(weatherIcon));
-  weatherIconW = weatherIcon;
-}
-
-void drawAdditionalPage(int8_t posX) {
-  clearArea(posX);
+  /*lcd.setCursor(13, 0); lcd.print(second()); // написание текущей секунды (только для дебага!!)
+  if ((second()) < 10)  lcd.print(" ");*/
   
+  if (isTimePrinted != isTimeShouldBeOnDisplay()) { // если нужно сменить дату на время (или наоборот)
+    isTimePrinted = isTimeShouldBeOnDisplay();
+    lcd.setCursor(11, 1);
+    if (isTimePrinted) {
+      updateClockAndDate(1); // пишем время
+    }
+    else {
+      updateClockAndDate(2); // пишем дату
+      if (millis()-keysPressedTime > LCD_DELAY_BRIGHTNESS) tryUpdateWeather(); // получение погоды, если необходимо
+    }
+    updateTemperature(); // получение температуры с датчиков
+  }
+  else if (isTimePrinted and lastMinute != minute()) { // если произошла смена минуты и написано неактуальное время
+    lcd.setCursor(11, 1);
+    updateClockAndDate(1);
+    lastMinute = minute();
+    if (millis()-keysPressedTime > LCD_DELAY_BRIGHTNESS) tryUpdateTime(); // получение времени, если необходимо
+  }
+}
+
+void drawAdditionalPage(int8_t posX) { // отрисовка дополнительной вкладки
+  clearArea(posX);
+
   // скорость ветра
-  lcd.setCursor(posX, 0); lcd.print(nowWindSpeed); 
-  if (units == IMPERIAL) lcd.print("м/ч");
-  else lcd.print("м/с");
+  lcd.setCursor(posX, 0);
+  printWindSpeed();
 
-  // вычисление пробелов для влажности
-  int freeSymbols = 6;
-  if (nowWindSpeed>9) freeSymbols--; // если скорость занимает 2 символа, то отнимаем свободную ячейку
-  if (nowWindSpeed>99) freeSymbols--; // если скорость занимает 3 символа, то отнимаем свободную ячейку
-  if (nowHumidity>9) freeSymbols--; // если влажность занимает 2 символа, то отнимаем свободную ячейку
-  if (nowHumidity==100) freeSymbols--; // если влажность занимает 3 символа, то отнимаем свободную ячейку
-  if (units==RUS or nowPressure>999) freeSymbols--; // если давление в мм рт. ст. или давление в hPa и занимает 4 символа, то отнимаем свободную ячейку
-
-  for (int i = 0; i<ceil(freeSymbols/2.0); i++) lcd.print(" "); // перемещение
-  lcd.print(nowHumidity); lcd.print("%"); // само написание влажности
+  // влажность
+  int freeSymbols = 8 - getCharCount(cWindSpeed) - getCharCount(cHumidity); // вычисление пробелов для влажности
+  if (units == U_RUS or cPressure > 999) freeSymbols--; // если давление в мм рт. ст. или давление в hPa и занимает 4 символа, то отнимаем свободную ячейку
+  for (int i = 0; i < ceil(freeSymbols/2.0); i++) lcd.print(" "); // перемещение для влажности
+  printHumidity(); // само написание влажности
 
   // давление
-  if (units==RUS or nowPressure>1000) lcd.setCursor(posX+11, 0);
+  if (units == U_RUS or cPressure > 1000) lcd.setCursor(posX+11, 0);
   else lcd.setCursor(posX+12, 0);
-  lcd.print(nowPressure); 
-  lcd.write(byte(6));
-  if (units==RUS) lcd.write(byte(7));
+  printPressure();
 
+  // написание погоды в помещении или в городе
   lcd.setCursor(posX, 1);
-  if (indoorTemp == -127) {
-    if (outdoorTemp == -127) {
-      lcd.print("В помещении ??");
-    }
-    else { // если на главной выводится температура с внешнего датчика - пишем температуру с OWM
-      lcd.print("В городе ");
-      if (now()-weatherUpdated>DELAY_CHECK_WEATHER*2) { lcd.print("??"); }
-      else { lcd.print(nowTemperature); lcd.write(byte(0)); }
-    }
-  }
-  else {
-    lcd.print("В помещении "); lcd.print(indoorTemp); lcd.write(byte(0));
-  }
+  if (isOutdoorSensorConnected() and !isIndoorSensorConnected()) printCityTemp();
+  else printIndoorTemp();
 }
-void drawDebugPage(int8_t posX) {
+
+void drawDebugPage(int8_t posX) { // отрисовка вкладки для отладки
   clearArea(posX);
 
-  lcd.setCursor(posX, 0); lcd.print("В городе "); lcd.print(nowTemperature); lcd.write(byte(0));
+  // верхняя строка:
+  lcd.setCursor(posX, 0);
+  if (isOutdoorSensorConnected() and isIndoorSensorConnected()) printCityTemp(); // пишем погоду в городе, если в других вкладках выводится погода с различных датчиков
+  else printInitials(); // пишем инициалы разработчика, если все полученные данные итак есть в других вкладках
 
-  lcd.setCursor(posX, 1); lcd.print("Uptime ");
-  lcd.print(millis()/86400000); lcd.print("d");
-  lcd.print(millis()%86400000/3600000); lcd.print("h");
-  lcd.print(millis()%3600000/60000); lcd.print("m");
+  // пишем версию прошивки
+  lcd.setCursor(posX + 15 - getCharCount(FIRMWARE_VERSION), 0);
+  printVer();
+
+  // пишем время работы после включения
+  lcd.setCursor(posX, 1);
+  printUptime();
 }
-void drawHourPage(int8_t posX, int8_t h) {
+
+void drawHourPage(int8_t posX, int8_t h) { // отрисовка вкладки с информацией о часе
   clearArea(posX);
 
-  lcd.setCursor(posX, 0); lcd.print(hour(weatherChecked+h*3600)); lcd.write(byte(3)); lcd.print(day(weatherChecked+h*3600)); lcd.write(byte(4)); // пишем час и день
+  // пишем час и день
+  lcd.setCursor(posX, 0);
+  printDayAndHour(lastFullWeatherUpdate+h*3600);
 
-  // вычисление количества пробелов
-  int freeSymbols = 7;
-  if (hour(weatherChecked+h*3600)>9) freeSymbols--; // если час занимает 2 символа, то отнимаем свободную ячейку
-  if (day(weatherChecked+h*3600)>9) freeSymbols--; // если день занимает 2 символа, то отнимаем свободную ячейку
-  if (hourlyTemperature[h]>9 or -10<hourlyTemperature[h] and hourlyTemperature[h]<0) freeSymbols--; // если реальная температура занимает 2 символа, то отнимаем свободную ячейку
-  else if (hourlyTemperature[h]<-9 or 99<hourlyTemperature[h]) freeSymbols-=2; // или если реальная температура занимает 3 символа, то отнимаем 2 свободных ячейки
-  if (hourlyFeels[h]>9 or -10<hourlyFeels[h] and hourlyFeels[h]<0) freeSymbols--; // если чувствуемая температура занимает 2 символа, то отнимаем свободную ячейку
-  else if (hourlyFeels[h]<-9 or 99<hourlyFeels[h]) freeSymbols-=2; // или если чувствуемая температура занимает 3 символа, то отнимаем 2 свободных ячейки
-    
-  if(freeSymbols==1) { // если занято почти максимальное количество клеток (возможен лишь один пробел)
-    lcd.print(" "); lcd.print(hourlyTemperature[h]); lcd.write(byte(0)); // пишем пробел и реальную температуру
-    lcd.write("\x1F"/*byte(4)*/); lcd.print(hourlyFeels[h]); lcd.write(byte(0)); // без пробела пишем ощущаемую температуру
+  // температура справа (реал/ощущ)
+  int freeSymbols = 11 - getCharCount(hour(lastFullWeatherUpdate+h*3600)) - getCharCount(day(lastFullWeatherUpdate+h*3600)) - getCharCount(hTemp[h]) - getCharCount(hFeelingTemp[h]); // вычисление количества пробелов
+
+  if (freeSymbols == 1) { // если занято почти максимальное количество клеток (возможен лишь один пробел): пишем обе температуры вплотную
+    lcd.print(" "); // пишем пробел
+    printTemp(hTemp[h]); // и реальную температуру
   }
-  else{ // если доступно более 1 символа
-    for (int i = 0; i<freeSymbols-1; i++) lcd.print(" "); // перемещение на freeSymbols-1 символов
-  
-    lcd.print(hourlyTemperature[h]); lcd.write(byte(0)); // пишем реальную температуру
+  else { // если возможно несколько пробелов: пишем обе температуры через пробел
+    for (int i = 0; i < freeSymbols-1; i++) lcd.print(" "); // перемещение на freeSymbols-1 символов
+    printTemp(hTemp[h]); // пишем реальную температуру
     lcd.print(" "); // втыкаем 1 пробел
-    lcd.write("\x1F"/*byte(4)*/); lcd.print(hourlyFeels[h]); lcd.write(byte(0)); // пишем ощущаемую температуру
   }
-  
-  lcd.setCursor(posX, 1); lcd.print(getStatus(hourlyStatus[h]));
+  lcd.write("\x1F"); // пишем символ "примерно"
+  printTemp(hFeelingTemp[h]); // пишем ощущаемую температуру
+
+  // статус погоды
+  lcd.setCursor(posX, 1); printStatus(hStatus[h]);
 }
-void drawDayPage(int8_t posX, int8_t d) {
+
+void drawDayPage(int8_t posX, int8_t d) { // отрисовка вкладки с информацией о дне
   clearArea(posX);
-  
-  lcd.setCursor(posX, 0); lcd.print(day(weatherChecked+d*86400)); lcd.print("."); lcd.print(month(weatherChecked+d*86400)); // пишем день и месяц
 
-  // вычисление символов от края экрана
-  int someSymbols = 11;
-  if (dailyTemperatureMin[d]>9 or -10<dailyTemperatureMin[d] and dailyTemperatureMin[d]<0) someSymbols--; // если минимальная температура занимает 2 символа, то отнимаем свободную ячейку
-  else if (dailyTemperatureMin[d]<-9 or 99<dailyTemperatureMin[d]) someSymbols-=2; // или если минимальная температура занимает 3 символа, то отнимаем 2 свободных ячейки
-  if (dailyTemperatureMax[d]>9 or -10<dailyTemperatureMax[d] and dailyTemperatureMax[d]<0) someSymbols--; // если максимальная температура занимает 2 символа, то отнимаем свободную ячейку
-  else if (dailyTemperatureMax[d]<-9 or 99<dailyTemperatureMax[d]) someSymbols-=2; // или если максимальная температура занимает 3 символа, то отнимаем 2 свободных ячейки
+  // пишем день и месяц
+  lcd.setCursor(posX, 0);
+  printDayAndMonth(lastFullWeatherUpdate+d*86400);
 
-  lcd.setCursor(posX+someSymbols, 0); lcd.print(dailyTemperatureMin[d]); lcd.write(byte(0)); lcd.print("/"); lcd.print(dailyTemperatureMax[d]); lcd.write(byte(0)); // пишем температуру справа
+  // температура справа (мин/макс)
+  int8_t freeSymbols = posX + 13 - getCharCount(dMinTemp[d]) - getCharCount(dMaxTemp[d]); // вычисление символов от края экрана
+  lcd.setCursor(freeSymbols, 0); printTemp(dMinTemp[d]); lcd.print("/"); printTemp(dMaxTemp[d]); // пишем температуру
 
-  lcd.setCursor(posX, 1); lcd.print(getStatus(dailyStatus[d]));
+  // статус погоды
+  lcd.setCursor(posX, 1); printStatus(dStatus[d]);
 }
 
-void flipLeft(int8_t fun, int8_t pageNumber = 0) {
-  for (int i = -2; i<1; i++) {
-    switch(fun) {
-      case mainP: {drawMainPage(i); break;}
-      case addP: {drawAdditionalPage(i); break;}
-      case debugP: {drawDebugPage(i); break;}
-      case hourP: {drawHourPage(i, pageNumber); break;}
-      case dayP: {drawDayPage(i, pageNumber); break;}
-    }
-    delayMicroseconds(80*1000);
-  }
-}
-
-void flipRight(int8_t fun, int8_t pageNumber = 0) {
-  for (int i = 2; i>-1; i--) {
-    switch(fun) {
-      case mainP: {drawMainPage(i); break;}
-      case addP: {drawAdditionalPage(i); break;}
-      case debugP: {drawDebugPage(i); break;}
-      case hourP: {drawHourPage(i, pageNumber); break;}
-      case dayP: {drawDayPage(i, pageNumber); break;}
-    }
-    delayMicroseconds(80*1000);
-  }
-}
-
-void drawSettingPage(int8_t n) {
+void drawSettingPage(int8_t n) { // отрисовка информации для настройки
   lcd.clear();
-  if (n == 1) {
-    lcd.setCursor(0, 0); lcd.print("Для настройки");
-    lcd.setCursor(0, 1); lcd.print("подключитесь к");
-  }
-  else if (n == 2) {
-    lcd.setCursor(0, 0); lcd.print("подключитесь к");
-    lcd.setCursor(0, 1); lcd.print("точке доступа");
-  }
-  else if (n == 3) {
-    lcd.setCursor(0, 0); lcd.print("точке доступа");
-    lcd.setCursor(0, 1); lcd.print("\"Weather stati-");
-  }
-  else if (n == 4) {
-    lcd.setCursor(0, 0); lcd.print("\"Weather stati-");
-    lcd.setCursor(0, 1); lcd.print("on by mxkmn\"");
-  }
-  else if (n == 5) {
-    lcd.setCursor(0, 0); lcd.print("on by mxkmn\"");
-    lcd.setCursor(0, 1); lcd.print("После введите");
-  }
-  else if (n == 6) {
-    lcd.setCursor(0, 0); lcd.print("После введите");
-    lcd.setCursor(0, 1); lcd.print(WiFi.softAPIP());
-  }
-  else if (n == 7) {
-    lcd.setCursor(0, 0); lcd.print(WiFi.softAPIP());
-    lcd.setCursor(0, 1); lcd.print("в браузере.");
-  }
+  lcd.setCursor(0, 0); lcd.print(getSettingLine(n-1));
+  lcd.setCursor(0, 1); lcd.print(getSettingLine(n));
 }
 
-void drawWifiStatus(int8_t n) {
-  if (n == 0) {
+void setupBrightness() {
+  int br = 200;
+  while(true) {
     lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("Подключение WiFi");
-  }
-  else if (n == 1) {    
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("Подключен к WiFi");
-  }
-  else if (n == 2) {
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("WiFi недоступен!");
-  }
-  else if (n == 3) {    
-    lcd.setCursor(0, 1); lcd.write(218); lcd.print("заж. для настр"); lcd.write(218);
-  }
-  else if (n == 4) {
-    lcd.setCursor(0, 1); lcd.print(" заж. для настр.");
-  }
-  else if (n == 5) {
-    lcd.setCursor(0, 1); lcd.print("Получение данных");
-  }
-}
 
-void drawClearingPage() {
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("Очистка");
-  lcd.setCursor(0, 1); lcd.print("хранилища");
+    updateButtonVars(true);
+    if (lButtonPressed) br -= 5;
+    if (rButtonPressed) br += 5;
+
+    if (br < 0) br = 0;
+    if (br > 255) br = 255;
+
+    analogWrite(LCD_BACKLIGHT_PIN, br);
+    lcd.print(br);
+    delay(150);
+  }
 }

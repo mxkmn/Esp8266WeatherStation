@@ -1,7 +1,7 @@
-String readFile(String file) {
+String readFile(String file) { // чтение из файла и вывод полученной информации
   File f = SPIFFS.open(file, "r");
   if (!f) { // если при открытии/создании файла возникла ошибка
-    if (mainLogging) Serial.println("Ошибка: " + file + " не был прочитан.");
+    if (useMainLogging) Serial.println("Ошибка: " + file + " не был прочитан.");
     f.close();
     return("error");
   }
@@ -9,19 +9,19 @@ String readFile(String file) {
   f.close();
   return out.substring(0, out.length()-1);
 }
-void writeFile(String file, String data) {
+
+void writeFile(String file, String data) { // запись в файл
   File f = SPIFFS.open(file, "w");
   if (!f) { // если при открытии/создании файла возникла ошибка
-    if (mainLogging) Serial.println("Ошибка: в " + file + " не была записана информация.");
+    if (useMainLogging) Serial.println("Ошибка: в " + file + " не была записана информация.");
   }
   else f.println(data);
   f.close();
 }
 
-void checkMemory() {
-  SPIFFS.begin();
+void checkMemory() { // проверка и добыча данных из памяти
   if (!SPIFFS.exists("/firm_vers")) { // если первый запуск (файла не существует)
-    drawClearingPage();
+    drawSettingPage(9);
     SPIFFS.format(); // форматирование хранилища
 
     writeFile("/firm_vers", String(FIRMWARE_VERSION));
@@ -41,32 +41,35 @@ void checkMemory() {
       Serial.println("Новая версия прошивки: " + readFile("/firm_vers"));
     }
   }
-  apiKey = readFile("/API_key");
+  owm.setApiKey(readFile("/API_key"));
   
-  lat = readFile("/latitude").toFloat();
-  lon = readFile("/longitude").toFloat();
-  
+  trueLatitude = readFile("/latitude").toFloat();
+  trueLongitude = readFile("/longitude").toFloat();
+
   units = readFile("/units").toInt();
-  activateDebugPage = readFile("/act_debug_p").toInt();
-  tempSensorsReversed = readFile("/temp_sens_rev").toInt();
-  oneSensorIsOutdoor = readFile("/one_sensor_is_outdoor").toInt();
+  isDebugPageActivated = readFile("/act_debug_p").toInt();
+  isTempSensorsReversed = readFile("/temp_sens_rev").toInt();
+  isSingleSensorOutdoor = readFile("/one_sensor_is_outdoor").toInt();
   weatherIconsCheckingCounters = readFile("/wea_icon_counts").toInt();
-  mainLogging = readFile("/main_logging").toInt();
-  wifiLogging = readFile("/wifi_logging").toInt();
-  setupAtPowerOn = readFile("/setup_at_power_on").toInt();
+  useMainLogging = readFile("/main_logging").toInt();
+  useWifiLogging = readFile("/wifi_logging").toInt();
+  canSetupAtPowerOn = readFile("/setup_at_power_on").toInt();
+
+  owm.setUnits(units == U_IMPERIAL ? IMPERIAL : METRIC);
 }
 
-String getValue(String data, char separator, int index) { // функция отсюда: https://arduino.stackexchange.com/a/1237
-    int found = 0;
-    int strIndex[] = {0, -1};
-    int maxIndex = data.length()-1;
+String getValue(String data, char separator, int index) { // разделение строки по символу и возврат элемента с позиции index
+  // функция отсюда: https://arduino.stackexchange.com/a/1237
+  int found = 0;
+  int strIndex[] = {0, -1};
+  int maxIndex = data.length()-1;
 
-    for (int i = 0; i <= maxIndex && found <= index; i++) {
-      if (data.charAt(i) == separator || i == maxIndex) {
-        found++;
-        strIndex[0] = strIndex[1] + 1;
-        strIndex[1] = (i == maxIndex) ? i+1 : i;
-      }
+  for (int i = 0; i <= maxIndex && found <= index; i++) {
+    if (data.charAt(i) == separator || i == maxIndex) {
+      found++;
+      strIndex[0] = strIndex[1] + 1;
+      strIndex[1] = (i == maxIndex) ? i+1 : i;
     }
-    return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
+  }
+  return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
