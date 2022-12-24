@@ -119,6 +119,7 @@ String getSettingLine(int8_t i) {
     // оповещение об очистке пользовательского ROM
     case 8: return("Очистка");
     case 9: return("хранилища");
+    default: return("");
   }
 }
 
